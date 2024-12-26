@@ -59,7 +59,11 @@
 
 // Setup Stages
 #define AT_TEST 0
-#define AT_PAIR 1
+#define AT_SET_CONNECT_MODE 1
+#define AT_SET_MAX_CONNECTIONS 2
+#define AT_START_SERVER 3
+#define AT_SEND_HTML 4
+#define AT_SEND_CONNECT_REQUEST 5
 
 #define HEADER 0xAAAB
 #define BUFFER_SIZE 64
@@ -436,12 +440,29 @@ void Configure_ESP_As_Access_Point(void) {
 #endif
         Send_Command("AT\r\n");
     	break;
-    case AT_PAIR:
+
+    case AT_SET_CONNECT_MODE:
 #ifdef DEBUG
-    	CDC_Transmit_FS((uint8_t *)"Sending AT Pair HSpot and connect mode command\r\n", 48);
+    	CDC_Transmit_FS((uint8_t *)"Sending AT set HotSpot and Connect mode command\r\n", 49);
         HAL_Delay(10);
 #endif
     	Send_Command("AT+CWMODE=2\r\n");
+    	break;
+
+    case AT_SET_MAX_CONNECTIONS:
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"Sending AT set max connections command\r\n", 40);
+        HAL_Delay(10);
+#endif
+    	Send_Command("AT+CIPMUX=1\r\n");
+    	break;
+
+    case AT_START_SERVER:
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"Sending AT start server command\r\n", 33);
+        HAL_Delay(10);
+#endif
+    	Send_Command("AT+CIPSERVER=1,80\r\n");
     	break;
 
     default:
@@ -532,6 +553,38 @@ uint8_t Has_Response_Finished(){
 	return 0;
 }
 
+void Log_Setup_Stage_Change() {
+
+	if (setup_stage == AT_TEST)
+		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_TEST\r\n", 33);
+	else if (setup_stage == AT_SET_CONNECT_MODE)
+		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_SET_CONNECT_MODE\r\n", 45);
+	else if (response_status == AT_SET_MAX_CONNECTIONS)
+		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_SET_MAX_CONNECTIONS\r\n", 48);
+	else if (response_status == AT_START_SERVER)
+		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_START_SERVER\r\n", 41);
+	else if (response_status == AT_SEND_HTML)
+		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_SEND_HTML\r\n", 38);
+	else if (response_status == AT_SEND_CONNECT_REQUEST)
+		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_SEND_CONNECT_REQUEST\r\n", 49);
+
+    HAL_Delay(10);
+}
+
+void Set_Setup_Stage(uint8_t new_stage) {
+	if (new_stage < 0 || new_stage > 1) { //TODE test
+#ifdef DEBUG
+	    CDC_Transmit_FS((uint8_t *)"new_stage is invalid...\r\n", 25);
+	    HAL_Delay(10);
+#endif
+	    return;
+	}
+	setup_stage = new_stage;
+#ifdef DEBUG
+	Log_Setup_Stage_Change();
+#endif
+}
+
 void Handle_Response() {
 	  //HAL_UART_AbortReceive_IT(&huart2);
 
@@ -544,8 +597,8 @@ void Handle_Response() {
 		CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_END===\r\n", 24);
 		HAL_Delay(10);
 
-		CDC_Transmit_FS((uint8_t *)"Command recognized\r\n", 20);
-		HAL_Delay(10);
+		//CDC_Transmit_FS((uint8_t *)"Command recognized\r\n", 20);
+		//HAL_Delay(10);
 	}
 #endif
 
@@ -556,20 +609,22 @@ void Handle_Response() {
     		CDC_Transmit_FS((uint8_t *)"TIMEOUT: sending AT Test\r\n", 26);
     	}
     	else if (response_status == ERROR) {
-    		CDC_Transmit_FS((uint8_t *)"ERROR: Non expected response sending AT Test\r\n", 46);
+    		CDC_Transmit_FS((uint8_t *)"ERROR: sending AT Test\r\n", 24);
     	}
     	else if (response_status == SUCCESS) {
     		CDC_Transmit_FS((uint8_t *)"SUCCESS: sending AT Test\r\n", 26);
+    		HAL_Delay(10);
+    		Set_Setup_Stage(AT_SET_CONNECT_MODE);
     	}
     	break;
-    case AT_PAIR:
+    case AT_SET_CONNECT_MODE:
     	//if (Has_Response_Finished() == 1) {
-    		CDC_Transmit_FS((uint8_t *)"Response to mode setup 1 not implemented\r\n", 42);
+    		CDC_Transmit_FS((uint8_t *)"RESPONSE_NOT_IMPLEMENTED: AT Pair\r\n", 35);
     	//}
     	break;
 
     default:
-    		CDC_Transmit_FS((uint8_t *)"Response to mode setup not implemented\r\n", 40);
+    		CDC_Transmit_FS((uint8_t *)"RESPONSE_NOT_IMPLEMENTED: Unknown Setup Stage\r\n", 47);
     	break;
 	}
     HAL_Delay(10);
