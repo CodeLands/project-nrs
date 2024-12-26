@@ -129,6 +129,7 @@ float Convert_To_Gauss(int16_t raw_value);
 void Verify_Sensors(void);
 void Clear_Interrupts(void);
 void Send_Command(const char* cmd);
+void Change_Response_Status(uint8_t new_status);
 
 #if ENABLE_MAGNETOMETER
 void Handle_Magnetometer(void);
@@ -347,6 +348,20 @@ void Handle_Gyroscope(void) {
 }
 #endif
 
+void Change_Response_Status(uint8_t new_status) {
+	if (new_status < 0 || new_status > 5) {
+/*#ifdef DEBUG
+	    CDC_Transmit_FS((uint8_t *)"new_status is invalid...\r\n", 26);
+	    HAL_Delay(10);
+#endif*/
+	    return;
+	}
+
+	//last_response_status = response_status;
+	has_response_changed = 1;
+	response_status = new_status;
+}
+
 void Clear_RX_Buffer() {
     memset(rx_buffer, 0, RX_BUFFER_SIZE);
 	HAL_Delay(10);
@@ -413,8 +428,6 @@ uint8_t Wait_For_Response(const char *expected_response, uint32_t timeout_ms) {
 }
 
 void Configure_ESP_As_Access_Point(void) {
-    //uint8_t success = 0;
-	//HAL_Delay(10);
     switch(setup_stage) {
     case AT_TEST: // AT Test
 #ifdef DEBUG
@@ -422,10 +435,6 @@ void Configure_ESP_As_Access_Point(void) {
         HAL_Delay(10);
 #endif
         Send_Command("AT\r\n");
-/*#ifdef DEBUG
-    	CDC_Transmit_FS((uint8_t *)"AT Test command was sent\r\n", 26);
-        HAL_Delay(10);
-#endif*/
     	break;
     case AT_PAIR:
 #ifdef DEBUG
@@ -443,47 +452,6 @@ void Configure_ESP_As_Access_Point(void) {
     	break;
     }
     HAL_Delay(10);
-
-    /*Send_Command("AT\r\n");
-    success = Wait_For_Response("OK", 2000);
-	if (success == 0) {
-		CDC_Transmit_FS((uint8_t *)"Timeout sending AT Test\r\n", 25);
-		return;
-	}
-	if (success == 2) {
-		CDC_Transmit_FS((uint8_t *)"Non expected response sending AT Test\r\n", 39);
-		return;
-	}
-	if (success == 1) {
-		CDC_Transmit_FS((uint8_t *)"Success sending AT Test\r\n", 25);
-		return;
-	}
-
-    // Set Wi-Fi mode to AP
-    Send_Command("AT+CWMODE=2\r\n");
-    success = Wait_For_Response("OK", 2000);
-    if (!success) {
-        CDC_Transmit_FS((uint8_t *)"Failed to set Wi-Fi mode\n", 26);
-        return;
-    }
-
-    // Configure multiple connections
-    Send_Command("AT+CIPMUX=1\r\n");
-    success = Wait_For_Response("OK", 2000);
-    if (!success) {
-        CDC_Transmit_FS((uint8_t *)"Failed to set CIPMUX\n", 22);
-        return;
-    }
-
-    // Start the server
-    Send_Command("AT+CIPSERVER=1,80\r\n");
-    success = Wait_For_Response("OK", 2000);
-    if (!success) {
-        CDC_Transmit_FS((uint8_t *)"Failed to start server\n", 24);
-        return;
-    }
-
-    CDC_Transmit_FS((uint8_t *)"ESP Access Point Configured\n", 30);*/
 }
 
 void Send_HTML_Page(void) {
@@ -611,20 +579,6 @@ void Handle_Response() {
     Change_Response_Status(IDLE);
 
     //HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
-}
-
-void Change_Response_Status(uint8_t new_status) {
-	if (new_status < 0 || new_status > 5) {
-/*#ifdef DEBUG
-	    CDC_Transmit_FS((uint8_t *)"new_status is invalid...\r\n", 26);
-	    HAL_Delay(10);
-#endif*/
-	    return;
-	}
-
-	//last_response_status = response_status;
-	has_response_changed = 1;
-	response_status = new_status;
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -755,8 +709,8 @@ int main(void)
 	      //continue;
 	  }
 
-	  /*if(Is_Timedout(1000) == 1 && response_status == WAITING)
-		  Change_Response_Status(TIMEOUT);*/
+	  if(Is_Timedout(1000) == 1 && response_status == WAITING)
+		  Change_Response_Status(TIMEOUT);
 
 	  if (response_status == SEND_REQUEST) {
 		  Configure_ESP_As_Access_Point();
