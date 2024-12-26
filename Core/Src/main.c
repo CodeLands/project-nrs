@@ -49,6 +49,18 @@
 #define LED_PORT GPIOC
 #endif
 
+// Response Statuses
+#define TIMEOUT 0
+#define SUCCESS 1
+#define ERROR 2
+#define WAITING 3
+#define IDLE 4
+#define SEND_REQUEST 5
+
+// Setup Stages
+#define AT_TEST 0
+#define AT_PAIR 1
+
 #define HEADER 0xAAAB
 #define BUFFER_SIZE 64
 
@@ -64,8 +76,8 @@
 
 #define RX_BUFFER_SIZE 256
 
-#define APP_RX_DATA_SIZE 2048
-#define APP_TX_DATA_SIZE 2048
+//#define APP_RX_DATA_SIZE 2048
+//#define APP_TX_DATA_SIZE 2048
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -92,7 +104,12 @@ volatile uint8_t rx_buffer[RX_BUFFER_SIZE];
 volatile uint8_t shadow_buffer[RX_BUFFER_SIZE];
 volatile uint16_t rx_index = 0;
 volatile uint8_t rx_data_ready = 0;
-volatile uint8_t responseComplete = 0; // 0 = not complete, 1 = complete
+
+volatile uint8_t setup_stage = AT_TEST;
+volatile uint8_t response_status = IDLE;
+volatile uint8_t has_response_changed = 0;
+//volatile uint8_t last_response_status = IDLE;
+volatile uint32_t tick_when_sent = 0; // Added to track response timing
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -106,11 +123,12 @@ void Init_All_Sensors(void);
 void Pack_Data(uint8_t *binary_buffer, int16_t x, int16_t y, int16_t z);
 void Transmit_Data_ASCII(const char *sensor_label, float x, float y, float z);
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
-uint8_t i2c1_pisiRegister(uint8_t device, uint8_t reg, uint8_t value);
-void i2c1_beriRegistre(uint8_t device, uint8_t reg, uint8_t* data, uint8_t length);
-float convertToGauss(int16_t raw_value);
+uint8_t Pisi_Register(uint8_t device, uint8_t reg, uint8_t value);
+void Beri_Registre(uint8_t device, uint8_t reg, uint8_t* data, uint8_t length);
+float Convert_To_Gauss(int16_t raw_value);
 void Verify_Sensors(void);
-void ClearInterrupts(void);
+void Clear_Interrupts(void);
+void Send_Command(const char* cmd);
 
 #if ENABLE_MAGNETOMETER
 void Handle_Magnetometer(void);
@@ -125,63 +143,28 @@ void Handle_Gyroscope(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-    if (GPIO_Pin == GPIO_PIN_0) { // Button press
-        transmission_mode = (transmission_mode + 1) % 5;
-
-#ifdef DEBUG
-        HAL_GPIO_TogglePin(GPIOE, LED_PIN_SEND_MODE);
-#endif
-  	  Send_AT_Command();
-    }
-
-    #if ENABLE_MAGNETOMETER
-    if (GPIO_Pin == GPIO_PIN_2) { // DRDY for magnetometer
-        data_ready_mag = 1;
-#ifdef DEBUG
-        HAL_GPIO_TogglePin(GPIOE, LED_PIN_MAGNET);
-#endif
-    }
-    #endif
-    #if ENABLE_ACCELEROMETER
-    if (GPIO_Pin == GPIO_PIN_4) { // INT1 for accelerometer
-        data_ready_acc = 1;
-#ifdef DEBUG
-        HAL_GPIO_TogglePin(GPIOE, LED_PIN_ACCEL);
-#endif
-    }
-    #endif
-    #if ENABLE_GYROSCOPE
-    if (GPIO_Pin == GPIO_PIN_1) { // INT2 for gyroscope
-        data_ready_gyr = 1;
-#ifdef DEBUG
-        HAL_GPIO_TogglePin(GPIOE, LED_PIN_GYRO);
-#endif
-    }
-    #endif
-}
 
 /* Sensor initialization */
 void Init_All_Sensors(void) {
     #if ENABLE_MAGNETOMETER
     // Initialize magnetometer
-    i2c1_pisiRegister(0x1E, 0x60, 0x8C);  // CFG_REG_A: Enable XYZ, 20 Hz
-    i2c1_pisiRegister(0x1E, 0x61, 0x00);  // CFG_REG_B: ±50 gauss
-    i2c1_pisiRegister(0x1E, 0x62, 0x01);  // CFG_REG_C: DRDY interrupt
+    Pisi_Register(0x1E, 0x60, 0x8C);  // CFG_REG_A: Enable XYZ, 20 Hz
+    Pisi_Register(0x1E, 0x61, 0x00);  // CFG_REG_B: ±50 gauss
+    Pisi_Register(0x1E, 0x62, 0x01);  // CFG_REG_C: DRDY interrupt
     HAL_Delay(10);
     #endif
 
     #if ENABLE_ACCELEROMETER
     // Initialize accelerometer
-    i2c1_pisiRegister(0x19, 0x20, 0x4F);  // CTRL_REG1: Enable XYZ, 50 Hz
-    i2c1_pisiRegister(0x19, 0x23, 0x80);  // CTRL_REG4: ±4g scale
+    Pisi_Register(0x19, 0x20, 0x4F);  // CTRL_REG1: Enable XYZ, 50 Hz
+    Pisi_Register(0x19, 0x23, 0x80);  // CTRL_REG4: ±4g scale
     HAL_Delay(10);
     #endif
 
     #if ENABLE_GYROSCOPE
     // Initialize gyroscope
-    i2c1_pisiRegister(0x6B, 0x20, 0x0F); // CTRL_REG1: Enable XYZ, 200 Hz
-    i2c1_pisiRegister(0x6B, 0x23, 0x30); // CTRL_REG4: ±500 dps
+    Pisi_Register(0x6B, 0x20, 0x0F); // CTRL_REG1: Enable XYZ, 200 Hz
+    Pisi_Register(0x6B, 0x23, 0x30); // CTRL_REG4: ±500 dps
     HAL_Delay(10);
     #endif
 }
@@ -191,7 +174,7 @@ void Verify_Sensors(void) {
     uint8_t who_am_i = 0;
 
     #if ENABLE_MAGNETOMETER
-    i2c1_beriRegistre(0x1E, 0x4F, &who_am_i, 1); // Read WHO_AM_I register
+    Beri_Registre(0x1E, 0x4F, &who_am_i, 1); // Read WHO_AM_I register
     if (who_am_i != 0x6E) {
         CDC_Transmit_FS((uint8_t *)"Magnetometer communication failed\n", 34);
     } else {
@@ -211,7 +194,7 @@ void Verify_Sensors(void) {
     #endif
 
     #if ENABLE_GYROSCOPE
-    i2c1_beriRegistre(0x6B, 0x0F, &who_am_i, 1); // Read WHO_AM_I register
+    Beri_Registre(0x6B, 0x0F, &who_am_i, 1); // Read WHO_AM_I register
     if (who_am_i != 0xD4) {
         CDC_Transmit_FS((uint8_t *)"Gyroscope communication failed\n", 32);
     } else {
@@ -222,29 +205,29 @@ void Verify_Sensors(void) {
 }
 
 /* Clear Interrupt Flags */
-void ClearInterrupts(void) {
+void Clear_Interrupts(void) {
     uint8_t dummy[6];
 
     #if ENABLE_MAGNETOMETER
-    i2c1_beriRegistre(0x1E, 0x68, dummy, 6); // Clear magnetometer DRDY
+    Beri_Registre(0x1E, 0x68, dummy, 6); // Clear magnetometer DRDY
     #endif
 
     #if ENABLE_ACCELEROMETER
-    i2c1_beriRegistre(0x19, 0x28 | 0x80, dummy, 6); // Clear accelerometer interrupt
+    Beri_Registre(0x19, 0x28 | 0x80, dummy, 6); // Clear accelerometer interrupt
     #endif
 
     #if ENABLE_GYROSCOPE
-    i2c1_beriRegistre(0x6B, 0x28 | 0x80, dummy, 6); // Clear gyroscope interrupt
+    Beri_Registre(0x6B, 0x28 | 0x80, dummy, 6); // Clear gyroscope interrupt
     #endif
 }
 
 /* I2C helper functions */
-uint8_t i2c1_pisiRegister(uint8_t device, uint8_t reg, uint8_t value) {
+uint8_t Pisi_Register(uint8_t device, uint8_t reg, uint8_t value) {
     device <<= 1;
     return HAL_I2C_Mem_Write(&hi2c1, device, reg, I2C_MEMADD_SIZE_8BIT, &value, 1, HAL_MAX_DELAY);
 }
 
-void i2c1_beriRegistre(uint8_t device, uint8_t reg, uint8_t* data, uint8_t length) {
+void Beri_Registre(uint8_t device, uint8_t reg, uint8_t* data, uint8_t length) {
     if ((length > 1) && (device == 0x1E)) {
         reg |= 0x80; // Auto-increment for magnetometer
     }
@@ -252,7 +235,8 @@ void i2c1_beriRegistre(uint8_t device, uint8_t reg, uint8_t* data, uint8_t lengt
     HAL_I2C_Mem_Read(&hi2c1, device, reg, I2C_MEMADD_SIZE_8BIT, data, length, HAL_MAX_DELAY);
 }
 
-float convertToGauss(int16_t raw_value) {
+float Convert_To_Gauss(int16_t raw_value) {
+
     return raw_value * (50.0f / 32768.0f);
 }
 
@@ -288,8 +272,8 @@ void Handle_Magnetometer(void) {
     data_ready_mag = 0;
 
     int16_t raw_data[3];
-    i2c1_beriRegistre(0x1E, 0x68, (uint8_t*)raw_data, 6);
-    ClearInterrupts(); // Clear interrupt flags
+    Beri_Registre(0x1E, 0x68, (uint8_t*)raw_data, 6);
+    Clear_Interrupts(); // Clear interrupt flags
 
     if (transmission_mode == MODE_BINARY_UART || transmission_mode == MODE_BINARY_CDC) {
         uint8_t binary_buffer[10];
@@ -315,8 +299,8 @@ void Handle_Accelerometer(void) {
     data_ready_acc = 0;
 
     int16_t raw_data[3];
-    i2c1_beriRegistre(0x19, 0x28 | 0x80, (uint8_t*)raw_data, 6);
-    ClearInterrupts(); // Clear interrupt flags
+    Beri_Registre(0x19, 0x28 | 0x80, (uint8_t*)raw_data, 6);
+    Clear_Interrupts(); // Clear interrupt flags
 
     if (transmission_mode == MODE_BINARY_UART || transmission_mode == MODE_BINARY_CDC) {
         uint8_t binary_buffer[10];
@@ -342,8 +326,8 @@ void Handle_Gyroscope(void) {
     data_ready_gyr = 0;
 
     int16_t raw_data[3];
-    i2c1_beriRegistre(0x6B, 0x28 | 0x80, (uint8_t*)raw_data, 6);
-    ClearInterrupts(); // Clear interrupt flags
+    Beri_Registre(0x6B, 0x28 | 0x80, (uint8_t*)raw_data, 6);
+    Clear_Interrupts(); // Clear interrupt flags
 
     if (transmission_mode == MODE_BINARY_UART || transmission_mode == MODE_BINARY_CDC) {
         uint8_t binary_buffer[10];
@@ -365,89 +349,352 @@ void Handle_Gyroscope(void) {
 
 void Clear_RX_Buffer() {
     memset(rx_buffer, 0, RX_BUFFER_SIZE);
+	HAL_Delay(10);
     rx_index = 0;
-}
-
-void Send_AT_Command() {
-    uint8_t tx_data[] = "AT\r\n";
-
-   HAL_UART_Transmit(&huart2, tx_data, sizeof(tx_data) - 1, HAL_MAX_DELAY);
-}
-
-void SendCommand(const char* cmd) {
-    // Clear the buffer before sending a new command
-    Clear_RX_Buffer();
-    // Clear the flag
-    responseComplete = 0;
-
-    // Transmit the command
-    HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-}
-
-void HandleUartReceive() {
-/*#ifdef DEBUG
-
-        char c = rx_buffer[rx_index];
-
-        char dbg[32];
-        if (c == '\r') {
-            strcpy(dbg, "Got \\r\r\n");
-        } else if (c == '\n') {
-            strcpy(dbg, "Got \\n\r\n");
-        } else {
-            snprintf(dbg, sizeof(dbg), "Got %c\r\n", c);
-        }
-        CDC_Transmit_FS((uint8_t*)dbg, strlen(dbg));
-#endif*/
 #ifdef DEBUG
-        char dbg[300];
-        snprintf(dbg, sizeof(dbg), "Buffer: %s\r\n", rx_buffer);
-        CDC_Transmit_FS((uint8_t*)dbg, strlen(dbg));
+    CDC_Transmit_FS((uint8_t*)"Cleaned Buffer\r\n", 16);
+    HAL_Delay(10);
+#endif
+}
+
+void Send_Command(const char* cmd) {
+	HAL_UART_AbortReceive_IT(&huart2);
+	    //HAL_Delay(10);
+    //Clear_RX_Buffer();
+	HAL_Delay(10);
+    //tick_when_sent = HAL_GetTick();
+	Change_Response_Status(WAITING);
+    HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
+    HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+}
+
+uint8_t Is_Timedout(uint32_t timeout_ms) {
+	//HAL_Delay(10);
+	uint32_t current_tick = HAL_GetTick();
+
+	if ((current_tick - tick_when_sent) > timeout_ms) {
+	    return 1; // Timed out
+	}
+	return 0;
+}
+
+uint8_t Wait_For_Response(const char *expected_response, uint32_t timeout_ms) {
+	  //HAL_UART_AbortReceive_IT(&huart2);
+
+    uint32_t start_time = HAL_GetTick();
+    tick_when_sent = start_time; // Reset tick to start time
+
+    char message[32] = "\0"; // Buffer to store the message
+    uint32_t current_tick = HAL_GetTick();
+    while (current_tick - start_time < timeout_ms) {
+    	if (response_status) {
+            if (strstr((char *)rx_buffer, expected_response)) {
+                return 1; // Success
+            }
+    		return 2; // Error
+    	}
+
+        if (HAL_GetTick() - tick_when_sent > 500) { // Timeout for no new data
+            CDC_Transmit_FS((uint8_t *)"No data received\n", 17);
+            HAL_Delay(10);
+            break;
+        }
+        snprintf(message, sizeof(message), "Current tick: %lu\r\n", current_tick); // Format the message
+        CDC_Transmit_FS((uint8_t *)message, strlen(message)); // Transmit the message
+        HAL_Delay(10);
+        message[0] = '\0';
+        current_tick = HAL_GetTick();
+    }
+    Clear_RX_Buffer();
+    response_status = 0;
+
+    //HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+    return 0; // Timeout
+}
+
+void Configure_ESP_As_Access_Point(void) {
+    //uint8_t success = 0;
+	//HAL_Delay(10);
+    switch(setup_stage) {
+    case AT_TEST: // AT Test
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"Sending AT Test command\r\n", 25);
+        HAL_Delay(10);
+#endif
+        Send_Command("AT\r\n");
+/*#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"AT Test command was sent\r\n", 26);
+        HAL_Delay(10);
+#endif*/
+    	break;
+    case AT_PAIR:
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"Sending AT Pair HSpot and connect mode command\r\n", 48);
+        HAL_Delay(10);
+#endif
+    	Send_Command("AT+CWMODE=2\r\n");
+    	break;
+
+    default:
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"That Setup Stage not implemented yet\r\n", 38);
+        HAL_Delay(10);
+#endif
+    	break;
+    }
+    HAL_Delay(10);
+
+    /*Send_Command("AT\r\n");
+    success = Wait_For_Response("OK", 2000);
+	if (success == 0) {
+		CDC_Transmit_FS((uint8_t *)"Timeout sending AT Test\r\n", 25);
+		return;
+	}
+	if (success == 2) {
+		CDC_Transmit_FS((uint8_t *)"Non expected response sending AT Test\r\n", 39);
+		return;
+	}
+	if (success == 1) {
+		CDC_Transmit_FS((uint8_t *)"Success sending AT Test\r\n", 25);
+		return;
+	}
+
+    // Set Wi-Fi mode to AP
+    Send_Command("AT+CWMODE=2\r\n");
+    success = Wait_For_Response("OK", 2000);
+    if (!success) {
+        CDC_Transmit_FS((uint8_t *)"Failed to set Wi-Fi mode\n", 26);
+        return;
+    }
+
+    // Configure multiple connections
+    Send_Command("AT+CIPMUX=1\r\n");
+    success = Wait_For_Response("OK", 2000);
+    if (!success) {
+        CDC_Transmit_FS((uint8_t *)"Failed to set CIPMUX\n", 22);
+        return;
+    }
+
+    // Start the server
+    Send_Command("AT+CIPSERVER=1,80\r\n");
+    success = Wait_For_Response("OK", 2000);
+    if (!success) {
+        CDC_Transmit_FS((uint8_t *)"Failed to start server\n", 24);
+        return;
+    }
+
+    CDC_Transmit_FS((uint8_t *)"ESP Access Point Configured\n", 30);*/
+}
+
+void Send_HTML_Page(void) {
+    const char *html_page = "<!DOCTYPE html>\n"
+                            "<html>\n"
+                            "<head><title>Wi-Fi Config</title></head>\n"
+                            "<body>\n"
+                            "<form method=\"GET\" action=\"/\">\n"
+                            "SSID: <input type=\"text\" name=\"ssid\"><br>\n"
+                            "Password: <input type=\"text\" name=\"password\"><br>\n"
+                            "<input type=\"submit\" value=\"Submit\">\n"
+                            "</form>\n"
+                            "</body>\n"
+                            "</html>\n";
+
+    char http_header[128];
+    snprintf(http_header, sizeof(http_header), "AT+CIPSEND=0,%d\r\n", strlen(html_page));
+
+    Send_Command(http_header);
+    if (Wait_For_Response(">", 2000)) {
+        HAL_UART_Transmit(&huart2, (uint8_t *)html_page, strlen(html_page), HAL_MAX_DELAY);
+        Wait_For_Response("SEND OK", 2000);
+    } else {
+        CDC_Transmit_FS((uint8_t *)"Failed to send HTML page\n", 26);
+    }
+}
+
+void Handle_Client_Request(void) {
+    if (strstr((char *)rx_buffer, "GET /?ssid=")) {
+        char *ssid = strstr((char *)rx_buffer, "ssid=") + 5;
+        char *password = strstr((char *)rx_buffer, "password=") + 9;
+
+        char *end_ssid = strstr(ssid, "&");
+        if (end_ssid) *end_ssid = '\0';
+
+        char *end_password = strstr(password, " ");
+        if (end_password) *end_password = '\0';
+
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
+        Send_Command(cmd);
+
+        if (Wait_For_Response("OK", 10000)) {
+            CDC_Transmit_FS((uint8_t *)"Connected to Wi-Fi\n", 20);
+        } else {
+            CDC_Transmit_FS((uint8_t *)"Failed to connect to Wi-Fi\n", 28);
+        }
+    }
+}
+
+void Log_Response_Status_Change() {
+
+	if (response_status == TIMEOUT)
+		CDC_Transmit_FS((uint8_t *)"Response status changed to: TIMEOUT\r\n", 37);
+	else if (response_status == SUCCESS)
+		CDC_Transmit_FS((uint8_t *)"Response status changed to: SUCCESS\r\n", 37);
+	else if (response_status == ERROR)
+		CDC_Transmit_FS((uint8_t *)"Response status changed to: ERROR\r\n", 35);
+	else if (response_status == WAITING)
+		CDC_Transmit_FS((uint8_t *)"Response status changed to: WAITING\r\n", 37);
+	else if (response_status == IDLE)
+		CDC_Transmit_FS((uint8_t *)"Response status changed to: IDLE\r\n", 34);
+
+    HAL_Delay(10);
+}
+
+uint8_t Has_Response_Finished(){
+#ifdef DEBUG
+	if (has_response_changed == 1){
+		Log_Response_Status_Change();
+		has_response_changed = 0;
+	}
+#endif
+	if (response_status >= TIMEOUT && response_status < WAITING) {
+		//CDC_Transmit_FS((uint8_t *)"Response to mode set not implemented\r\n", 38);
+		return 1;
+	}
+	return 0;
+}
+
+void Handle_Response() {
+	  //HAL_UART_AbortReceive_IT(&huart2);
+
+#ifdef DEBUG
+	if (response_status == SUCCESS || response_status == ERROR) {
+		CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_START===\r\n", 26);
+		HAL_Delay(10);
+		CDC_Transmit_FS((uint8_t *)rx_buffer, strlen((char *)rx_buffer));
+		HAL_Delay(10);
+		CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_END===\r\n", 24);
+		HAL_Delay(10);
+
+		CDC_Transmit_FS((uint8_t *)"Command recognized\r\n", 20);
+		HAL_Delay(10);
+	}
 #endif
 
+    // TODO Here we can parse rx_buffer if needed
+	switch(setup_stage) {
+    case AT_TEST: // AT Test
+    	if (response_status == TIMEOUT) {
+    		CDC_Transmit_FS((uint8_t *)"TIMEOUT: sending AT Test\r\n", 26);
+    	}
+    	else if (response_status == ERROR) {
+    		CDC_Transmit_FS((uint8_t *)"ERROR: Non expected response sending AT Test\r\n", 46);
+    	}
+    	else if (response_status == SUCCESS) {
+    		CDC_Transmit_FS((uint8_t *)"SUCCESS: sending AT Test\r\n", 26);
+    	}
+    	break;
+    case AT_PAIR:
+    	//if (Has_Response_Finished() == 1) {
+    		CDC_Transmit_FS((uint8_t *)"Response to mode setup 1 not implemented\r\n", 42);
+    	//}
+    	break;
 
-        // Move to the next buffer index
-        /*rx_index++;
-        if (rx_index >= RX_BUFFER_SIZE)
-        {
-            rx_index = 0; // Wrap around if buffer is full
-        }*/
+    default:
+    		CDC_Transmit_FS((uint8_t *)"Response to mode setup not implemented\r\n", 40);
+    	break;
+	}
+    HAL_Delay(10);
 
-        // Restart UART reception for the next byte
-        //HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_buffer[rx_index], 1);
+    // Then clear it after we’re done
+    Clear_RX_Buffer();
+    Change_Response_Status(IDLE);
 
-        if (strstr((char*)rx_buffer, "OK") != NULL ||
-            strstr((char*)rx_buffer, "ERROR") != NULL)
-        {
-            responseComplete = 1;
-        }
+    //HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+}
+
+void Change_Response_Status(uint8_t new_status) {
+	if (new_status < 0 || new_status > 5) {
+/*#ifdef DEBUG
+	    CDC_Transmit_FS((uint8_t *)"new_status is invalid...\r\n", 26);
+	    HAL_Delay(10);
+#endif*/
+	    return;
+	}
+
+	//last_response_status = response_status;
+	has_response_changed = 1;
+	response_status = new_status;
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART2) // Check if it's USART2
     {
-    	//rx_data_ready = 1;
-  	  /*if (rx_data_ready)
-  	  {*/
-  	      //rx_data_ready = 0;
+  	  HAL_UART_AbortReceive_IT(&huart2);
+
+#ifdef DEBUG
+        HAL_GPIO_TogglePin(GPIOE, LED_PIN_UART);
+#endif
+
     	rx_index++;
         if (rx_index >= RX_BUFFER_SIZE) rx_index = 0;
 
-        if (strstr((char *)rx_buffer, "OK") || strstr((char *)rx_buffer, "ERROR")) {
-            responseComplete = 1;
+        if (strstr((char *)rx_buffer, "OK")){
+            Change_Response_Status(SUCCESS);
+            //return;
+        } else if (strstr((char *)rx_buffer, "ERROR")){
+        	Change_Response_Status(ERROR);
+        	//return;
         }
 
     	HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_buffer[rx_index], 1);
         // Ensure null-termination
-        if (rx_index < RX_BUFFER_SIZE) {
+        /*if (rx_index < RX_BUFFER_SIZE) {
             rx_buffer[rx_index] = '\0';
-        }
-  	      //HandleUartReceive();
-  	      //continue;
-  	  //}
+        }*/
     }
 }
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+    if (GPIO_Pin == GPIO_PIN_0) { // Button press
+        transmission_mode = (transmission_mode + 1) % 5;
+
+#ifdef DEBUG
+        HAL_GPIO_TogglePin(GPIOE, LED_PIN_SEND_MODE);
+        //HAL_Delay(10);
+#endif
+        //Send_Command("AT\r\n");
+        Change_Response_Status(SEND_REQUEST);
+        //HAL_Delay(10);
+    }
+
+    #if ENABLE_MAGNETOMETER
+    if (GPIO_Pin == GPIO_PIN_2) { // DRDY for magnetometer
+        data_ready_mag = 1;
+#ifdef DEBUG
+        HAL_GPIO_TogglePin(GPIOE, LED_PIN_MAGNET);
+#endif
+    }
+    #endif
+    #if ENABLE_ACCELEROMETER
+    if (GPIO_Pin == GPIO_PIN_4) { // INT1 for accelerometer
+        data_ready_acc = 1;
+#ifdef DEBUG
+        HAL_GPIO_TogglePin(GPIOE, LED_PIN_ACCEL);
+#endif
+    }
+    #endif
+    #if ENABLE_GYROSCOPE
+    if (GPIO_Pin == GPIO_PIN_1) { // INT2 for gyroscope
+        data_ready_gyr = 1;
+#ifdef DEBUG
+        HAL_GPIO_TogglePin(GPIOE, LED_PIN_GYRO);
+#endif
+    }
+    #endif
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -488,8 +735,9 @@ int main(void)
   //HAL_Delay(2000);
   //Init_All_Sensors();
   //Verify_Sensors(); // Verify all sensor communication
-  //ClearInterrupts(); // Clear interrupt flags
+  //Clear_Interrupts(); // Clear interrupt flags
 
+  Log_Response_Status_Change();
   HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_buffer[rx_index], 1);
   /* USER CODE END 2 */
 
@@ -500,54 +748,21 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  /*if (rx_data_ready)
-	  {
-	      rx_data_ready = 0;
-	      HandleUartReceive();
-	      continue;
-	  } else */
-	  HAL_Delay(50);
+	  //HAL_Delay(10);
 
-      if (responseComplete == 1) {
-		HAL_UART_AbortReceive_IT(&huart2);
-
-#ifdef DEBUG
-	      uint8_t result0 = CDC_Transmit_FS((uint8_t *)"Command recognized\r\n", 21);
-	      if (result0 != USBD_OK)
-	      {
-	          // Optionally log or handle transmission failure
-	          CDC_Transmit_FS((uint8_t*)"CDC Transmission 0 Failed\r\n", 26);
-	      }
-	      HAL_Delay(10); // Add a delay between transmissions
-#endif
-
-
-#ifdef DEBUG
-	      CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_START===\r\n", 26);
-	      HAL_Delay(10);
-	      CDC_Transmit_FS((uint8_t *)rx_buffer, strlen((char *)rx_buffer));
-	      HAL_Delay(10);
-	      CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_END===\r\n", 24);
-
-        HAL_Delay(10); // Add a delay between transmissions
-
-	      uint8_t result2 = CDC_Transmit_FS((uint8_t*)"Cleaned Buffer\r\n", 16);
-	      if (result2 != USBD_OK)
-	      {
-	          // Optionally log or handle transmission failure
-	          CDC_Transmit_FS((uint8_t*)"CDC Transmission 2 Failed\r\n", 27);
-	      }
-	      HAL_Delay(10); // Add a delay between transmissions
-#endif
-
-	      // Here we can parse rx_buffer if needed
-	      // Then clear it after we’re done
-        Clear_RX_Buffer();
-	      responseComplete = 0;
-
-	      HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
-	      continue;
+      if (Has_Response_Finished() == 1) {
+    	  Handle_Response();
+	      //continue;
 	  }
+
+	  /*if(Is_Timedout(1000) == 1 && response_status == WAITING)
+		  Change_Response_Status(TIMEOUT);*/
+
+	  if (response_status == SEND_REQUEST) {
+		  Configure_ESP_As_Access_Point();
+	  	  //continue;
+	  }
+
 
       if (transmission_mode == MODE_NONE) {
           continue;
