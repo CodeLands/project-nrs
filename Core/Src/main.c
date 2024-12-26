@@ -62,8 +62,9 @@
 #define AT_SET_CONNECT_MODE 1
 #define AT_SET_MAX_CONNECTIONS 2
 #define AT_START_SERVER 3
-#define AT_SEND_HTML 4
-#define AT_SEND_CONNECT_REQUEST 5
+#define AT_SEND_HTML_HEADER 4
+#define AT_SEND_HTML 5
+#define AT_SEND_CONNECT_REQUEST 6
 
 #define HEADER 0xAAAB
 #define BUFFER_SIZE 64
@@ -78,7 +79,7 @@
 #define MODE_BINARY_CDC 3
 #define MODE_ASCII_CDC 4
 
-#define RX_BUFFER_SIZE 1024
+#define RX_BUFFER_SIZE 2048
 
 //#define APP_RX_DATA_SIZE 2048
 //#define APP_TX_DATA_SIZE 2048
@@ -115,6 +116,8 @@ volatile uint8_t has_response_changed = 0;
 volatile uint32_t tick_when_sent = 0; // Added to track response timing
 volatile uint8_t is_client_connected = 0;
 volatile uint8_t was_client_connected = 0;
+const char *html_page2 = "<!DOCTYPE html><html><head><title>Wi-Fi Config</title></head><body><form method=\"GET\" action=\"/\">SSID: <input type=\"text\" name=\"ssid\"><br>Password: <input type=\"text\" name=\"password\"><br><input type=\"submit\" value=\"Submit\"></form></body></html>\0";
+const char *html_page = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 45\r\n\r\n<html><body><h1>Hello, World!</h1></body></html>\r\n";
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -371,6 +374,7 @@ void Clear_RX_Buffer() {
     memset(rx_buffer, 0, RX_BUFFER_SIZE);
 	HAL_Delay(10);
     rx_index = 0;
+    rx_buffer[rx_index] = '\0';
 #ifdef DEBUG
     CDC_Transmit_FS((uint8_t*)"Cleaned Buffer\r\n", 16);
     HAL_Delay(10);
@@ -380,8 +384,8 @@ void Clear_RX_Buffer() {
 void Send_Command(const char* cmd) {
 	HAL_UART_AbortReceive_IT(&huart2);
 	    //HAL_Delay(10);
-    //Clear_RX_Buffer();
-	HAL_Delay(10);
+    Clear_RX_Buffer();
+	//HAL_Delay(10);
     tick_when_sent = HAL_GetTick();
 	Change_Response_Status(WAITING);
     HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
@@ -439,7 +443,7 @@ void Configure_ESP_As_Access_Point(void) {
     	CDC_Transmit_FS((uint8_t *)"Sending AT Test command\r\n", 25);
         HAL_Delay(10);
 #endif
-        Send_Command("AT\r\n");
+        Send_Command("AT\r\n\0");
     	break;
 
     case AT_SET_CONNECT_MODE:
@@ -447,7 +451,7 @@ void Configure_ESP_As_Access_Point(void) {
     	CDC_Transmit_FS((uint8_t *)"Sending AT set HotSpot and Connect mode command\r\n", 49);
         HAL_Delay(10);
 #endif
-    	Send_Command("AT+CWMODE=2\r\n");
+    	Send_Command("AT+CWMODE=3\r\n\0");
     	break;
 
     case AT_SET_MAX_CONNECTIONS:
@@ -455,7 +459,7 @@ void Configure_ESP_As_Access_Point(void) {
     	CDC_Transmit_FS((uint8_t *)"Sending AT set max connections command\r\n", 40);
         HAL_Delay(10);
 #endif
-    	Send_Command("AT+CIPMUX=1\r\n");
+    	Send_Command("AT+CIPMUX=1\r\n\0");
     	break;
 
     case AT_START_SERVER:
@@ -463,15 +467,23 @@ void Configure_ESP_As_Access_Point(void) {
     	CDC_Transmit_FS((uint8_t *)"Sending AT start server command\r\n", 33);
         HAL_Delay(10);
 #endif
-    	Send_Command("AT+CIPSERVER=1,80\r\n");
+    	Send_Command("AT+CIPSERVER=1,80\r\n\0");
     	break;
+
+    case AT_SEND_HTML_HEADER:
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"Sending HTML Header\r\n", 21);
+        HAL_Delay(10);
+#endif
+        Send_HTML_Header();
+        break;
 
     case AT_SEND_HTML:
 #ifdef DEBUG
     	CDC_Transmit_FS((uint8_t *)"Sending HTML\r\n", 14);
         HAL_Delay(10);
 #endif
-        Send_HTML_Page();
+        Send_Command(html_page);
     	break;
 
     case AT_SEND_CONNECT_REQUEST:
@@ -492,29 +504,11 @@ void Configure_ESP_As_Access_Point(void) {
     HAL_Delay(10);
 }
 
-void Send_HTML_Page(void) {
-    const char *html_page = "<!DOCTYPE html>\n"
-                            "<html>\n"
-                            "<head><title>Wi-Fi Config</title></head>\n"
-                            "<body>\n"
-                            "<form method=\"GET\" action=\"/\">\n"
-                            "SSID: <input type=\"text\" name=\"ssid\"><br>\n"
-                            "Password: <input type=\"text\" name=\"password\"><br>\n"
-                            "<input type=\"submit\" value=\"Submit\">\n"
-                            "</form>\n"
-                            "</body>\n"
-                            "</html>\n";
-
-    char http_header[128];
-    snprintf(http_header, sizeof(http_header), "AT+CIPSEND=0,%d\r\n", strlen(html_page));
-
-    Send_Command(http_header);
-    if (Wait_For_Response(">", 2000)) {
-        HAL_UART_Transmit(&huart2, (uint8_t *)html_page, strlen(html_page), HAL_MAX_DELAY);
-        Wait_For_Response("SEND OK", 2000);
-    } else {
-        CDC_Transmit_FS((uint8_t *)"Failed to send HTML page\n", 26);
-    }
+void Send_HTML_Header() {
+    //char http_header[128];
+    //snprintf(http_header, sizeof(http_header), "AT+CIPSEND=0,%d\r\n", 109);//strlen(html_page));
+    Send_Command("AT+CIPSEND=0,109\r\n\0");
+    //Send_Command(http_header);
 }
 
 void Send_Connect_Request(char *ssid, char *password) {
@@ -576,6 +570,8 @@ void Log_Setup_Stage_Change() {
 		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_SET_MAX_CONNECTIONS\r\n", 48);
 	else if (response_status == AT_START_SERVER)
 		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_START_SERVER\r\n", 41);
+	else if (response_status == AT_SEND_HTML_HEADER)
+		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_SEND_HTML_HEADER\r\n", 45);
 	else if (response_status == AT_SEND_HTML)
 		CDC_Transmit_FS((uint8_t *)"Setup stage changed to: AT_SEND_HTML\r\n", 38);
 	else if (response_status == AT_SEND_CONNECT_REQUEST)
@@ -585,7 +581,7 @@ void Log_Setup_Stage_Change() {
 }
 
 void Set_Setup_Stage(uint8_t new_stage) {
-	if (new_stage < 0 || new_stage > 5) {
+	if (new_stage < 0 || new_stage > 6) {
 #ifdef DEBUG
 	    CDC_Transmit_FS((uint8_t *)"new_stage is invalid...\r\n", 25);
 	    HAL_Delay(10);
@@ -595,6 +591,17 @@ void Set_Setup_Stage(uint8_t new_stage) {
 	setup_stage = new_stage;
 #ifdef DEBUG
 	Log_Setup_Stage_Change();
+#endif
+}
+
+void Log_Uart_Response() {
+#ifdef DEBUG
+	CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_START===\r\n", 26);
+	HAL_Delay(10);
+	CDC_Transmit_FS((uint8_t *)rx_buffer, strlen((char *)rx_buffer));
+	HAL_Delay(10);
+	CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_END===\r\n", 24);
+	HAL_Delay(10);
 #endif
 }
 
@@ -634,6 +641,9 @@ void Handle_Response() {
 		    	Set_Setup_Stage(AT_START_SERVER);
 		    	break;
 		    case AT_START_SERVER:
+		    	Set_Setup_Stage(AT_SEND_HTML_HEADER);
+		    	break;
+		    case AT_SEND_HTML_HEADER:
 		    	Set_Setup_Stage(AT_SEND_HTML);
 		    	break;
 		    case AT_SEND_HTML:
@@ -663,6 +673,8 @@ void Log_Client_Status_Change() {
 		return;
 	was_client_connected = is_client_connected;
 #ifdef DEBUG
+	Log_Uart_Response();
+
 	if (is_client_connected) {
 		CDC_Transmit_FS((uint8_t *)"Client Connected\r\n", 18);
 	} else {
@@ -672,20 +684,22 @@ void Log_Client_Status_Change() {
 #endif
 }
 
+/*void Append_To_Buffer(char c) {
+    if (buffer_index < BUFFER_SIZE - 1) {
+        buffer[buffer_index++] = c;
+        buffer[buffer_index] = '\0';
+    }
+}*/
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART2) // Check if it's USART2
     {
   	  HAL_UART_AbortReceive_IT(&huart2);
 
-#ifdef DEBUG
-        HAL_GPIO_TogglePin(GPIOE, LED_PIN_UART);
-		//CDC_Transmit_FS((uint8_t *)rx_buffer, strlen((char *)rx_buffer));
-		//HAL_Delay(10);
-#endif
-
     	rx_index++;
         if (rx_index >= RX_BUFFER_SIZE) rx_index = 0;
+        rx_buffer[rx_index] = '\0';
 
         if (strstr((char *)rx_buffer, "OK")){
             Change_Response_Status(SUCCESS);
@@ -695,13 +709,21 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         	//return;
         }
 
-        if (strstr((char *)rx_buffer, "0,CONNECT")) {
+        if (strstr((char *)rx_buffer, "+STA_CONNECTED")) {
         	was_client_connected = is_client_connected;
         	is_client_connected = 1;
-        } else if (strstr((char *)rx_buffer, "0,CLOSED")) {
+        	//Clear_RX_Buffer();
+        } else if (strstr((char *)rx_buffer, "+STA_DISCONNECTED")) {
         	was_client_connected = is_client_connected;
         	is_client_connected = 0;
+        	//Clear_RX_Buffer();
         }
+
+#ifdef DEBUG
+        HAL_GPIO_TogglePin(GPIOE, LED_PIN_UART);
+		//CDC_Transmit_FS((uint8_t *)rx_buffer, strlen((char *)rx_buffer));
+		//HAL_Delay(10);
+#endif
 
     	HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_buffer[rx_index], 1);
         // Ensure null-termination
@@ -812,7 +834,7 @@ int main(void)
 	      //continue;
 	  }
 
-	  if(Is_Timedout(2000) == 1 && response_status == WAITING)
+	  if(Is_Timedout(5000) == 1 && response_status == WAITING)
 		  Change_Response_Status(TIMEOUT);
 
 	  if (response_status == SEND_REQUEST) {
