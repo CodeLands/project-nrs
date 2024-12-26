@@ -78,7 +78,7 @@
 #define MODE_BINARY_CDC 3
 #define MODE_ASCII_CDC 4
 
-#define RX_BUFFER_SIZE 256
+#define RX_BUFFER_SIZE 1024
 
 //#define APP_RX_DATA_SIZE 2048
 //#define APP_TX_DATA_SIZE 2048
@@ -112,8 +112,9 @@ volatile uint8_t rx_data_ready = 0;
 volatile uint8_t setup_stage = AT_TEST;
 volatile uint8_t response_status = IDLE;
 volatile uint8_t has_response_changed = 0;
-//volatile uint8_t last_response_status = IDLE;
 volatile uint32_t tick_when_sent = 0; // Added to track response timing
+volatile uint8_t is_client_connected = 0;
+volatile uint8_t was_client_connected = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -381,7 +382,7 @@ void Send_Command(const char* cmd) {
 	    //HAL_Delay(10);
     //Clear_RX_Buffer();
 	HAL_Delay(10);
-    //tick_when_sent = HAL_GetTick();
+    tick_when_sent = HAL_GetTick();
 	Change_Response_Status(WAITING);
     HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
     HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
@@ -465,6 +466,22 @@ void Configure_ESP_As_Access_Point(void) {
     	Send_Command("AT+CIPSERVER=1,80\r\n");
     	break;
 
+    case AT_SEND_HTML:
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"Sending HTML\r\n", 14);
+        HAL_Delay(10);
+#endif
+        Send_HTML_Page();
+    	break;
+
+    case AT_SEND_CONNECT_REQUEST:
+#ifdef DEBUG
+    	CDC_Transmit_FS((uint8_t *)"Sending AT start server command\r\n", 33);
+        HAL_Delay(10);
+#endif
+        Send_Connect_Request("mlin", "dzorko16");
+    	break;
+
     default:
 #ifdef DEBUG
     	CDC_Transmit_FS((uint8_t *)"That Setup Stage not implemented yet\r\n", 38);
@@ -500,6 +517,12 @@ void Send_HTML_Page(void) {
     }
 }
 
+void Send_Connect_Request(char *ssid, char *password) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
+    Send_Command(cmd);
+}
+
 void Handle_Client_Request(void) {
     if (strstr((char *)rx_buffer, "GET /?ssid=")) {
         char *ssid = strstr((char *)rx_buffer, "ssid=") + 5;
@@ -510,16 +533,6 @@ void Handle_Client_Request(void) {
 
         char *end_password = strstr(password, " ");
         if (end_password) *end_password = '\0';
-
-        char cmd[128];
-        snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
-        Send_Command(cmd);
-
-        if (Wait_For_Response("OK", 10000)) {
-            CDC_Transmit_FS((uint8_t *)"Connected to Wi-Fi\n", 20);
-        } else {
-            CDC_Transmit_FS((uint8_t *)"Failed to connect to Wi-Fi\n", 28);
-        }
     }
 }
 
@@ -572,7 +585,7 @@ void Log_Setup_Stage_Change() {
 }
 
 void Set_Setup_Stage(uint8_t new_stage) {
-	if (new_stage < 0 || new_stage > 1) { //TODE test
+	if (new_stage < 0 || new_stage > 5) {
 #ifdef DEBUG
 	    CDC_Transmit_FS((uint8_t *)"new_stage is invalid...\r\n", 25);
 	    HAL_Delay(10);
@@ -597,43 +610,66 @@ void Handle_Response() {
 		CDC_Transmit_FS((uint8_t *)"===UART_RECEIVE_END===\r\n", 24);
 		HAL_Delay(10);
 
-		//CDC_Transmit_FS((uint8_t *)"Command recognized\r\n", 20);
-		//HAL_Delay(10);
+    	if (response_status == SUCCESS)
+    		CDC_Transmit_FS((uint8_t *)"SUCCESS...\r\n", 12);
+    	else //if (response_status == ERROR) {
+    		CDC_Transmit_FS((uint8_t *)"ERROR...\r\n", 10);
+	} else {
+		CDC_Transmit_FS((uint8_t *)"TIMEOUT...\r\n", 12);
+
 	}
+	HAL_Delay(10);
+
 #endif
 
-    // TODO Here we can parse rx_buffer if needed
-	switch(setup_stage) {
-    case AT_TEST: // AT Test
-    	if (response_status == TIMEOUT) {
-    		CDC_Transmit_FS((uint8_t *)"TIMEOUT: sending AT Test\r\n", 26);
-    	}
-    	else if (response_status == ERROR) {
-    		CDC_Transmit_FS((uint8_t *)"ERROR: sending AT Test\r\n", 24);
-    	}
-    	else if (response_status == SUCCESS) {
-    		CDC_Transmit_FS((uint8_t *)"SUCCESS: sending AT Test\r\n", 26);
-    		HAL_Delay(10);
-    		Set_Setup_Stage(AT_SET_CONNECT_MODE);
-    	}
-    	break;
-    case AT_SET_CONNECT_MODE:
-    	//if (Has_Response_Finished() == 1) {
-    		CDC_Transmit_FS((uint8_t *)"RESPONSE_NOT_IMPLEMENTED: AT Pair\r\n", 35);
-    	//}
-    	break;
+	if (response_status == SUCCESS) {
+		switch(setup_stage) {
+		    case AT_TEST:
+				Set_Setup_Stage(AT_SET_CONNECT_MODE);
+		    	break;
+		    case AT_SET_CONNECT_MODE:
+		    	Set_Setup_Stage(AT_SET_MAX_CONNECTIONS);
+		    	break;
+		    case AT_SET_MAX_CONNECTIONS:
+		    	Set_Setup_Stage(AT_START_SERVER);
+		    	break;
+		    case AT_START_SERVER:
+		    	Set_Setup_Stage(AT_SEND_HTML);
+		    	break;
+		    case AT_SEND_HTML:
+		    	Set_Setup_Stage(AT_SEND_CONNECT_REQUEST);
+		    	break;
+		    case AT_SEND_CONNECT_REQUEST:
+		    	Set_Setup_Stage(AT_TEST);
+		    	break;
 
-    default:
-    		CDC_Transmit_FS((uint8_t *)"RESPONSE_NOT_IMPLEMENTED: Unknown Setup Stage\r\n", 47);
-    	break;
+		    default:
+		    		CDC_Transmit_FS((uint8_t *)"RESPONSE_NOT_IMPLEMENTED: Unknown Setup Stage\r\n", 47);
+		    	    HAL_Delay(10);
+		    		break;
+			}
 	}
-    HAL_Delay(10);
+
 
     // Then clear it after we’re done
     Clear_RX_Buffer();
     Change_Response_Status(IDLE);
 
     //HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+}
+
+void Log_Client_Status_Change() {
+	if (was_client_connected == is_client_connected)
+		return;
+	was_client_connected = is_client_connected;
+#ifdef DEBUG
+	if (is_client_connected) {
+		CDC_Transmit_FS((uint8_t *)"Client Connected\r\n", 18);
+	} else {
+		CDC_Transmit_FS((uint8_t *)"Client Disconnected\r\n", 21);
+	}
+        HAL_Delay(10);
+#endif
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -644,6 +680,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 #ifdef DEBUG
         HAL_GPIO_TogglePin(GPIOE, LED_PIN_UART);
+		//CDC_Transmit_FS((uint8_t *)rx_buffer, strlen((char *)rx_buffer));
+		//HAL_Delay(10);
 #endif
 
     	rx_index++;
@@ -655,6 +693,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         } else if (strstr((char *)rx_buffer, "ERROR")){
         	Change_Response_Status(ERROR);
         	//return;
+        }
+
+        if (strstr((char *)rx_buffer, "0,CONNECT")) {
+        	was_client_connected = is_client_connected;
+        	is_client_connected = 1;
+        } else if (strstr((char *)rx_buffer, "0,CLOSED")) {
+        	was_client_connected = is_client_connected;
+        	is_client_connected = 0;
         }
 
     	HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_buffer[rx_index], 1);
@@ -759,12 +805,14 @@ int main(void)
     /* USER CODE BEGIN 3 */
 	  //HAL_Delay(10);
 
+	  Log_Client_Status_Change();
+
       if (Has_Response_Finished() == 1) {
     	  Handle_Response();
 	      //continue;
 	  }
 
-	  if(Is_Timedout(1000) == 1 && response_status == WAITING)
+	  if(Is_Timedout(2000) == 1 && response_status == WAITING)
 		  Change_Response_Status(TIMEOUT);
 
 	  if (response_status == SEND_REQUEST) {
